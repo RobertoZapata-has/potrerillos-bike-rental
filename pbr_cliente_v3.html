@@ -697,66 +697,137 @@ function closeModal(){document.getElementById('modal').style.display='none';}
 window.addEventListener('load',()=>{initComm();renderHRoutes();renderAllRoutes();});
 
 
+
 // ════════════════════════════════════════════════
-//  FIX DEFINITIVO — createElement en vez de innerHTML
-//  Evita todos los problemas de escape en mobile
+//  FIX: Estado de bicis en tiempo real
+//  - Escucha eventos MQTT de otros usuarios
+//  - Bloquea bicis ocupadas en la grilla
+//  - Actualiza en tiempo real si la grilla está abierta
 // ════════════════════════════════════════════════
+
+// Estado local de cada bici
+var bikeStates = {};
+BIKES.forEach(function(b) {
+  bikeStates[b.id] = { status: 'available', renter: null };
+});
+
+// Handler de eventos MQTT entrantes (del supervisor y otros clientes)
+window.handle = function(type, data) {
+  var id = data && data.id;
+  if (!id) return;
+
+  if (type === 'RENTAL_START') {
+    bikeStates[id] = { status: 'active', renter: data.renter || '?' };
+    refreshBikeChip(id);
+    // Si el usuario tenía esta bici seleccionada, deseleccionarla
+    if (bkBike === id) {
+      bkBike = null;
+      disB('bt3');
+      showModal('⚠️', 'Bici no disponible',
+        'La bicicleta #' + id + ' acaba de ser tomada por ' + (data.renter || 'otro cliente') + '. Por favor elegí otra.',
+        '#f59e0b');
+    }
+  } else if (type === 'END') {
+    bikeStates[id] = { status: 'available', renter: null };
+    refreshBikeChip(id);
+  } else if (type === 'SOS') {
+    // No bloquear bici por SOS, ya está en uso
+  }
+};
+
+// Actualizar el chip de una bici en la grilla si está visible
+function refreshBikeChip(id) {
+  var chip = document.getElementById('bkc-' + id);
+  if (!chip) return; // grilla no abierta, no hacer nada
+
+  var st = bikeStates[id];
+  if (st.status === 'active') {
+    // Bloquear: gris, no clickeable
+    chip.classList.remove('sel');
+    chip.style.cssText = 'border:2px solid #e2e8f0;border-radius:14px;padding:12px 6px;background:#f8fafc;cursor:not-allowed;text-align:center;opacity:.55;';
+    chip.replaceWith(chip.cloneNode(true)); // quitar event listeners
+    var newChip = document.getElementById('bkc-' + id);
+    if (newChip) {
+      newChip.querySelector('div:last-child').textContent = '🔒 En uso';
+      newChip.querySelector('div:last-child').style.color = '#94a3b8';
+    }
+    // Si estaba seleccionada, deseleccionar
+    if (bkBike === id) { bkBike = null; disB('bt3'); }
+  } else {
+    // Liberar: volver al estado normal
+    chip.style.cssText = 'border:2px solid #e2e8f0;border-radius:14px;padding:12px 6px;background:white;cursor:pointer;text-align:center;transition:all .2s;';
+    var statusEl = chip.querySelector('div:last-child');
+    if (statusEl) { statusEl.textContent = '✓ Libre'; statusEl.style.color = '#16a34a'; }
+    // Re-agregar event listener
+    (function(bikeId) {
+      chip.addEventListener('click', function() { selBike(bikeId); });
+      chip.addEventListener('touchend', function(e) { e.preventDefault(); selBike(bikeId); });
+    })(id);
+  }
+}
+
+// Reescribir goBk2 para usar bikeStates al construir la grilla
 window.goBk2 = function() {
   document.getElementById('bk-1').style.display = 'none';
   document.getElementById('bk-2').style.display = 'block';
   setSt(2);
 
   var grid = document.getElementById('bkg');
-  grid.innerHTML = ''; // limpiar
+  grid.innerHTML = '';
 
   BIKES.forEach(function(bike) {
-    // Crear cada chip con createElement — sin comillas anidadas
+    var st = bikeStates[bike.id] || { status: 'available' };
+    var ocupada = st.status === 'active' || st.status === 'sos';
+
     var div = document.createElement('div');
     div.className = 'bkc';
     div.id = 'bkc-' + bike.id;
 
-    // Ícono SVG
+    if (ocupada) {
+      div.style.cssText = 'border:2px solid #e2e8f0;border-radius:14px;padding:12px 6px;background:#f8fafc;cursor:not-allowed;text-align:center;opacity:.5;';
+    }
+
     var iconWrap = document.createElement('div');
-    iconWrap.style.cssText = 'background:#f0fdfa;border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;margin:0 auto 7px;';
-    iconWrap.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0d9488" stroke-width="2"><circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/><path d="M15 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-3 11.5V14l-3-3 4-3 2 3h2"/></svg>';
+    iconWrap.style.cssText = 'border-radius:10px;width:38px;height:38px;display:flex;align-items:center;justify-content:center;margin:0 auto 7px;background:' + (ocupada ? '#f1f5f9' : '#f0fdfa') + ';';
+    iconWrap.innerHTML = '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="' + (ocupada ? '#94a3b8' : '#0d9488') + '" stroke-width="2"><circle cx="5.5" cy="17.5" r="3.5"/><circle cx="18.5" cy="17.5" r="3.5"/><path d="M15 6a1 1 0 1 0 0-2 1 1 0 0 0 0 2zm-3 11.5V14l-3-3 4-3 2 3h2"/></svg>';
 
     var label = document.createElement('div');
-    label.style.cssText = 'font-size:11px;font-weight:800;color:#1e293b;';
+    label.style.cssText = 'font-size:11px;font-weight:800;color:' + (ocupada ? '#94a3b8' : '#1e293b') + ';';
     label.textContent = '#' + bike.id;
 
     var status = document.createElement('div');
-    status.style.cssText = 'font-size:9px;color:#16a34a;font-weight:700;margin-top:2px;';
-    status.textContent = '✓ Libre';
+    status.style.cssText = 'font-size:9px;font-weight:700;margin-top:2px;color:' + (ocupada ? '#94a3b8' : '#16a34a') + ';';
+    status.textContent = ocupada ? '🔒 En uso' : '✓ Libre';
 
     div.appendChild(iconWrap);
     div.appendChild(label);
     div.appendChild(status);
 
-    // Event listener directo — funciona perfecto en cualquier mobile
-    (function(id) {
-      div.addEventListener('click', function() {
-        selBike(id);
-      });
-      div.addEventListener('touchend', function(e) {
-        e.preventDefault();
-        selBike(id);
-      });
-    })(bike.id);
+    // Solo agregar listeners si está libre
+    if (!ocupada) {
+      (function(id) {
+        div.addEventListener('click', function() { selBike(id); });
+        div.addEventListener('touchend', function(e) { e.preventDefault(); selBike(id); });
+      })(bike.id);
+    }
 
     grid.appendChild(div);
   });
 };
 
-// También reescribir selBike para mayor robustez
-window.selBike = function(id) {
-  BIKES.forEach(function(b) {
-    var el = document.getElementById('bkc-' + b.id);
-    if (el) el.classList.remove('sel');
-  });
-  var selected = document.getElementById('bkc-' + id);
-  if (selected) selected.classList.add('sel');
-  bkBike = id;
-  enB('bt3');
+// Al confirmar reserva, verificar una vez más que la bici sigue libre
+var _origConfirmBk = window.confirmBk;
+window.confirmBk = function() {
+  if (!bkBike) { showModal('⚠️', 'Elegí una bicicleta', 'Por favor seleccioná una bici antes de confirmar.', '#f59e0b'); return; }
+  var st = bikeStates[bkBike];
+  if (st && (st.status === 'active' || st.status === 'sos')) {
+    showModal('⚠️', 'Bici no disponible',
+      'La bicicleta #' + bkBike + ' ya está en uso. Volvé al paso anterior y elegí otra.',
+      '#ef4444');
+    bkBike = null; disB('bt3');
+    return;
+  }
+  if (typeof _origConfirmBk === 'function') _origConfirmBk();
 };
 
 </script>
